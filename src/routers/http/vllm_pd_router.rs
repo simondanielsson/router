@@ -646,10 +646,13 @@ impl VllmPDRouter {
                 .get("echo")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+
+        // Check if original request was streaming
         let is_streaming = request_json
             .get("stream")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // Accept header "text/event-stream" for streaming requests seems unnecessary.
 
         // If logprobs requested and non-streaming, merge prefill and decode logprobs
         if needs_logprobs && !is_streaming {
@@ -690,29 +693,55 @@ impl VllmPDRouter {
 
             Ok(response)
         } else {
-            // No logprobs merging needed - return decode response as-is
+            // No logprobs merging needed - return decode response as-is (streaming or no logprobs)
             debug!(
                 "No logprobs merging needed (streaming={}, needs_logprobs={})",
                 is_streaming, needs_logprobs
             );
 
             let status = decode_response.status();
-            let headers = decode_response.headers().clone();
-            let body = decode_response
-                .bytes()
-                .await
-                .map_err(|e| format!("Failed to read decode response: {}", e))?;
 
-            let mut response_builder = axum::http::Response::builder().status(status);
-            for (name, value) in headers.iter() {
-                response_builder = response_builder.header(name, value);
+            // For streaming responses, use stream passthrough; otherwise read entire body
+            if is_streaming {
+                let mut response_builder = axum::http::Response::builder().status(status);
+
+                // Preserve headers from decode response
+                let decode_headers = decode_response.headers().clone();
+                for (name, value) in decode_headers.iter() {
+                    if name != "transfer-encoding" && name != "content-length" {
+                        response_builder = response_builder.header(name, value);
+                    }
+                }
+
+                // Stream the response body directly
+                let body = axum::body::Body::from_stream(decode_response.bytes_stream());
+                let response = response_builder.body(body).map_err(|e| {
+                    format!(
+                        "Failed to build streaming response from {}: {}",
+                        decode_http, e
+                    )
+                })?;
+
+                Ok(response)
+            } else {
+                // Non-streaming: read entire body
+                let decode_headers = decode_response.headers().clone();
+                let body = decode_response
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("Failed to read decode response: {}", e))?;
+
+                let mut response_builder = axum::http::Response::builder().status(status);
+                for (name, value) in decode_headers.iter() {
+                    response_builder = response_builder.header(name, value);
+                }
+
+                let response = response_builder
+                    .body(axum::body::Body::from(body))
+                    .map_err(|e| format!("Failed to build response: {}", e))?;
+
+                Ok(response)
             }
-
-            let response = response_builder
-                .body(axum::body::Body::from(body))
-                .map_err(|e| format!("Failed to build response: {}", e))?;
-
-            Ok(response)
         }
     }
 
