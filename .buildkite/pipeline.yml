@@ -111,7 +111,7 @@ steps:
                 - |
                   apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler python3 curl
                   curl -LsSf https://astral.sh/uv/install.sh | sh
-                  export PATH="$HOME/.local/bin:$PATH"
+                  source /root/.local/bin/env
                   uv venv /tmp/venv --seed
                   . /tmp/venv/bin/activate
                   uv pip install -U pip setuptools wheel setuptools-rust build
@@ -186,7 +186,7 @@ steps:
                 - |
                   apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler python3 curl
                   curl -LsSf https://astral.sh/uv/install.sh | sh
-                  export PATH="$HOME/.local/bin:$PATH"
+                  source /root/.local/bin/env
                   uv venv /tmp/venv --seed
                   . /tmp/venv/bin/activate
                   uv pip install -U pip setuptools wheel setuptools-rust
