@@ -69,7 +69,7 @@ fn test_prompt_input_single_int_array() {
     assert!(req.prompt.is_token_based());
     assert_eq!(
         req.prompt.extract_text_for_routing(),
-        "128000 9906 11 1917 0"
+        "128000\u{1f}9906\u{1f}11\u{1f}1917\u{1f}0\u{1f}"
     );
     assert_eq!(req.prompt.estimated_token_count(), 5);
 }
@@ -101,7 +101,8 @@ fn test_prompt_input_int_batch() {
     assert!(req.prompt.is_token_based());
     assert_eq!(
         req.prompt.extract_text_for_routing(),
-        "128000 9906 11 1917 0;128001 9906 11 1917 1"
+        "128000\u{1f}9906\u{1f}11\u{1f}1917\u{1f}0\u{1f}\
+         ;128001\u{1f}9906\u{1f}11\u{1f}1917\u{1f}1\u{1f}"
     );
     assert_eq!(req.prompt.estimated_token_count(), 10);
 }

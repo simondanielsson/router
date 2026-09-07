@@ -72,6 +72,32 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info};
 
+/// Unit separator that `PromptInput` uses to terminate each encoded token id.
+const TOKEN_SEPARATOR: char = '\u{1f}';
+
+/// Truncate a character-level prefix match to the last complete token boundary.
+///
+/// Token-id routing keys terminate each token with [`TOKEN_SEPARATOR`]. Because
+/// the routing tree matches on characters, two distinct tokens that share
+/// leading digits (e.g. `123456` and `123457`) would otherwise be credited a
+/// partial match. Rounding back to the last separator credits only complete,
+/// equal token IDs. Plain-text keys contain no separator and are returned as-is.
+fn complete_token_match(text: &str, matched_char_count: usize) -> usize {
+    if matched_char_count == 0 || !text.contains(TOKEN_SEPARATOR) {
+        return matched_char_count;
+    }
+    let mut boundary = 0;
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= matched_char_count {
+            break;
+        }
+        if ch == TOKEN_SEPARATOR {
+            boundary = idx + 1;
+        }
+    }
+    boundary
+}
+
 /// Cache-aware routing policy
 ///
 /// Routes requests based on cache affinity when load is balanced,
@@ -300,10 +326,11 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         // Now we work with the tree without holding the HashMap lock
         // Use prefix_match_with_counts to avoid redundant chars().count() calls
         let result = tree.prefix_match_with_counts(text);
+        let matched_char_count = complete_token_match(text, result.matched_char_count);
         let match_rate = if result.input_char_count == 0 {
             0.0
         } else {
-            result.matched_char_count as f32 / result.input_char_count as f32
+            matched_char_count as f32 / result.input_char_count as f32
         };
 
         debug!(
@@ -478,6 +505,32 @@ impl Drop for CacheAwarePolicy {
 mod tests {
     use super::*;
     use crate::core::{BasicWorker, WorkerType};
+
+    #[test]
+    fn test_complete_token_match_ignores_partial_token_ids() {
+        // "123457\u{1f}8\u{1f}" vs cached "123456\u{1f}7\u{1f}" share "12345"
+        // (5 chars) but zero complete tokens -> must credit 0.
+        let incoming = "123457\u{1f}8\u{1f}";
+        assert_eq!(complete_token_match(incoming, 5), 0);
+    }
+
+    #[test]
+    fn test_complete_token_match_credits_whole_tokens_only() {
+        // Matched through the second separator plus a partial third token ->
+        // credit only the two complete tokens (up to the last separator).
+        let incoming = "10\u{1f}20\u{1f}30\u{1f}";
+        assert_eq!(complete_token_match(incoming, 7), 6);
+        // A full match ending on a separator is kept in full.
+        let len = incoming.chars().count();
+        assert_eq!(complete_token_match(incoming, len), len);
+    }
+
+    #[test]
+    fn test_complete_token_match_leaves_text_keys_unchanged() {
+        // Plain-text keys have no separator, so the character match is returned
+        // as-is (mid-word matches are still credited, as before).
+        assert_eq!(complete_token_match("hello world", 8), 8);
+    }
 
     #[test]
     fn test_cache_aware_with_balanced_load() {

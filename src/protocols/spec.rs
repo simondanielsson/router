@@ -2337,10 +2337,10 @@ pub enum PromptInput {
 }
 
 fn encode_token_ids(ids: &[i32]) -> String {
-    ids.iter()
-        .map(|id| id.to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
+    // Terminate every token id with a unit separator (never present in text) so
+    // cache-aware routing, a character radix, credits only complete token IDs
+    // rather than shared leading digits of two different tokens.
+    ids.iter().map(|id| format!("{id}\u{1f}")).collect()
 }
 
 impl PromptInput {
@@ -2431,9 +2431,15 @@ mod tests {
     #[test]
     fn test_prompt_input_token_ids_routing_key() {
         let single = PromptInput::IntArray(vec![151644, 8948, 198, 2610]);
-        assert_eq!(single.extract_text_for_routing(), "151644 8948 198 2610");
+        assert_eq!(
+            single.extract_text_for_routing(),
+            "151644\u{1f}8948\u{1f}198\u{1f}2610\u{1f}"
+        );
         let batch = PromptInput::IntBatch(vec![vec![1, 2], vec![3, 4]]);
-        assert_eq!(batch.extract_text_for_routing(), "1 2;3 4");
+        assert_eq!(
+            batch.extract_text_for_routing(),
+            "1\u{1f}2\u{1f};3\u{1f}4\u{1f}"
+        );
     }
 
     #[test]
