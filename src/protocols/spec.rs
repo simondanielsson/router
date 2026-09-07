@@ -2336,11 +2336,15 @@ pub enum PromptInput {
     String(String),
 }
 
+/// Unit separator that terminates each encoded token id, so cache-aware routing
+/// (a character radix) credits only complete token IDs rather than shared
+/// leading digits of two different tokens. Never present in normal text.
+pub(crate) const TOKEN_ID_SEPARATOR: char = '\u{1f}';
+
 fn encode_token_ids(ids: &[i32]) -> String {
-    // Terminate every token id with a unit separator (never present in text) so
-    // cache-aware routing, a character radix, credits only complete token IDs
-    // rather than shared leading digits of two different tokens.
-    ids.iter().map(|id| format!("{id}\u{1f}")).collect()
+    ids.iter()
+        .map(|id| format!("{id}{TOKEN_ID_SEPARATOR}"))
+        .collect()
 }
 
 impl PromptInput {

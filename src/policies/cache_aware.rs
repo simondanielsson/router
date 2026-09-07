@@ -63,6 +63,7 @@ use super::{get_healthy_worker_indices, CacheAwareConfig, LoadBalancingPolicy, R
 use crate::core::Worker;
 use crate::metrics::RouterMetrics;
 use crate::policies::normalize_model_key;
+use crate::protocols::spec::TOKEN_ID_SEPARATOR;
 use crate::tree::Tree;
 use dashmap::DashMap;
 use rand::Rng;
@@ -72,23 +73,20 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info};
 
-/// Unit separator that `PromptInput` uses to terminate each encoded token id.
-const TOKEN_SEPARATOR: char = '\u{1f}';
-
 /// Cache-match ratio, computed per token for token-id routing keys and otherwise for chars.
 fn token_aware_match_rate(text: &str, matched_char_count: usize, input_char_count: usize) -> f32 {
     if input_char_count == 0 {
         return 0.0;
     }
-    if text.contains(TOKEN_SEPARATOR) {
-        let total_tokens = text.matches(TOKEN_SEPARATOR).count();
+    if text.contains(TOKEN_ID_SEPARATOR) {
+        let total_tokens = text.matches(TOKEN_ID_SEPARATOR).count();
         if total_tokens == 0 {
             return 0.0;
         }
         let matched_tokens = text
             .chars()
             .take(matched_char_count)
-            .filter(|c| *c == TOKEN_SEPARATOR)
+            .filter(|c| *c == TOKEN_ID_SEPARATOR)
             .count();
         return matched_tokens as f32 / total_tokens as f32;
     }
