@@ -75,27 +75,24 @@ use tracing::{debug, info};
 /// Unit separator that `PromptInput` uses to terminate each encoded token id.
 const TOKEN_SEPARATOR: char = '\u{1f}';
 
-/// Truncate a character-level prefix match to the last complete token boundary.
-///
-/// Token-id routing keys terminate each token with [`TOKEN_SEPARATOR`]. Because
-/// the routing tree matches on characters, two distinct tokens that share
-/// leading digits (e.g. `123456` and `123457`) would otherwise be credited a
-/// partial match. Rounding back to the last separator credits only complete,
-/// equal token IDs. Plain-text keys contain no separator and are returned as-is.
-fn complete_token_match(text: &str, matched_char_count: usize) -> usize {
-    if matched_char_count == 0 || !text.contains(TOKEN_SEPARATOR) {
-        return matched_char_count;
+/// Cache-match ratio, computed per token for token-id routing keys and otherwise for chars.
+fn token_aware_match_rate(text: &str, matched_char_count: usize, input_char_count: usize) -> f32 {
+    if input_char_count == 0 {
+        return 0.0;
     }
-    let mut boundary = 0;
-    for (idx, ch) in text.chars().enumerate() {
-        if idx >= matched_char_count {
-            break;
+    if text.contains(TOKEN_SEPARATOR) {
+        let total_tokens = text.matches(TOKEN_SEPARATOR).count();
+        if total_tokens == 0 {
+            return 0.0;
         }
-        if ch == TOKEN_SEPARATOR {
-            boundary = idx + 1;
-        }
+        let matched_tokens = text
+            .chars()
+            .take(matched_char_count)
+            .filter(|c| *c == TOKEN_SEPARATOR)
+            .count();
+        return matched_tokens as f32 / total_tokens as f32;
     }
-    boundary
+    matched_char_count as f32 / input_char_count as f32
 }
 
 /// Cache-aware routing policy
@@ -326,12 +323,8 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         // Now we work with the tree without holding the HashMap lock
         // Use prefix_match_with_counts to avoid redundant chars().count() calls
         let result = tree.prefix_match_with_counts(text);
-        let matched_char_count = complete_token_match(text, result.matched_char_count);
-        let match_rate = if result.input_char_count == 0 {
-            0.0
-        } else {
-            matched_char_count as f32 / result.input_char_count as f32
-        };
+        let match_rate =
+            token_aware_match_rate(text, result.matched_char_count, result.input_char_count);
 
         debug!(
             "Cache match for model '{}': matched_chars={}, input_chars={}, match_rate={:.2}",
@@ -507,29 +500,28 @@ mod tests {
     use crate::core::{BasicWorker, WorkerType};
 
     #[test]
-    fn test_complete_token_match_ignores_partial_token_ids() {
-        // "123457\u{1f}8\u{1f}" vs cached "123456\u{1f}7\u{1f}" share "12345"
-        // (5 chars) but zero complete tokens -> must credit 0.
+    fn test_token_aware_match_rate_ignores_partial_token_ids() {
+        // "123457\u{1f}8\u{1f}" vs cached "123456\u{1f}7\u{1f}" share 5 chars but
+        // zero complete tokens -> rate 0.
         let incoming = "123457\u{1f}8\u{1f}";
-        assert_eq!(complete_token_match(incoming, 5), 0);
+        let input = incoming.chars().count();
+        assert_eq!(token_aware_match_rate(incoming, 5, input), 0.0);
     }
 
     #[test]
-    fn test_complete_token_match_credits_whole_tokens_only() {
-        // Matched through the second separator plus a partial third token ->
-        // credit only the two complete tokens (up to the last separator).
+    fn test_token_aware_match_rate_counts_whole_tokens() {
+        // Matched through two separators plus a partial third token -> 2 of 3.
         let incoming = "10\u{1f}20\u{1f}30\u{1f}";
-        assert_eq!(complete_token_match(incoming, 7), 6);
-        // A full match ending on a separator is kept in full.
-        let len = incoming.chars().count();
-        assert_eq!(complete_token_match(incoming, len), len);
+        let input = incoming.chars().count();
+        assert_eq!(token_aware_match_rate(incoming, 7, input), 2.0 / 3.0);
+        // Full match -> 1.0.
+        assert_eq!(token_aware_match_rate(incoming, input, input), 1.0);
     }
 
     #[test]
-    fn test_complete_token_match_leaves_text_keys_unchanged() {
-        // Plain-text keys have no separator, so the character match is returned
-        // as-is (mid-word matches are still credited, as before).
-        assert_eq!(complete_token_match("hello world", 8), 8);
+    fn test_token_aware_match_rate_text_keys_use_chars() {
+        // Plain-text keys have no separator -> character ratio, unchanged.
+        assert_eq!(token_aware_match_rate("hello world", 6, 11), 6.0 / 11.0);
     }
 
     #[test]
