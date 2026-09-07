@@ -10,6 +10,7 @@ use crate::core::{BasicWorker, Worker, WorkerType};
 use crate::metrics::RouterMetrics;
 use crate::otel_http::{self, ClientRequestOptions};
 use crate::policies::PolicyRegistry;
+use crate::protocols::spec::GenerationRequest;
 use crate::routers::{header_utils, RouterTrait, WorkerManagement};
 use async_trait::async_trait;
 use axum::{
@@ -527,6 +528,31 @@ impl VllmPDRouter {
             .collect()
     }
 
+    /// Whether the prefill or decode policy needs the request text (cache_aware, consistent_hash)
+    fn policies_need_request_text(&self) -> bool {
+        self.policy_registry
+            .get_prefill_policy()
+            .needs_request_text()
+            || self
+                .policy_registry
+                .get_decode_policy()
+                .needs_request_text()
+    }
+
+    /// Routing text for cache-aware / consistent-hash policies, derived from the typed
+    /// request the same way the regular router does, and only when a policy needs it.
+    fn routing_text_for<T: GenerationRequest>(&self, body: &T) -> Option<String> {
+        if !self.policies_need_request_text() {
+            return None;
+        }
+        let text = body.extract_text_for_routing();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
     /// Select worker using policy-based load balancing
     fn select_worker_with_policy(
         &self,
@@ -556,6 +582,7 @@ impl VllmPDRouter {
     async fn process_vllm_request(
         &self,
         request_json: Value,
+        request_text: Option<String>,
         path: &str,
         headers: Option<&HeaderMap>,
     ) -> Response {
@@ -589,7 +616,6 @@ impl VllmPDRouter {
         }
 
         // Use policy-based load balancing to select prefill and decode workers
-        let request_text = serde_json::to_string(&request_json).ok();
         let request_str = request_text.as_deref();
 
         let prefill_idx =
@@ -1807,8 +1833,15 @@ impl RouterTrait for VllmPDRouter {
                     .into_response()
             }
         };
-        self.route_transparent(headers, "/generate", &Method::POST, request_json)
-            .await
+        let request_text = self.routing_text_for(body);
+        self.process_transparent(
+            headers,
+            "/generate",
+            &Method::POST,
+            request_json,
+            request_text,
+        )
+        .await
     }
 
     async fn route_inference_generate(
@@ -1827,11 +1860,13 @@ impl RouterTrait for VllmPDRouter {
                     .into_response()
             }
         };
-        self.route_transparent(
+        let request_text = self.routing_text_for(body);
+        self.process_transparent(
             headers,
             "/inference/v1/generate",
             &Method::POST,
             request_json,
+            request_text,
         )
         .await
     }
@@ -1871,7 +1906,8 @@ impl RouterTrait for VllmPDRouter {
             };
 
             // Process vLLM two-stage request with service discovery
-            self.process_vllm_request(request_json, "/v1/chat/completions", headers)
+            let request_text = self.routing_text_for(body);
+            self.process_vllm_request(request_json, request_text, "/v1/chat/completions", headers)
                 .await
         } else {
             // Direct URL mode - implement routing logic here (not delegating to PdRouterBase)
@@ -1919,7 +1955,7 @@ impl RouterTrait for VllmPDRouter {
             }
 
             // Select workers using policy with headers for consistent hash
-            let request_text = serde_json::to_string(&request_json).ok();
+            let request_text = self.routing_text_for(body);
             let request_str = request_text.as_deref();
             let request_headers: Option<HashMap<String, String>> = headers.map(|h| {
                 h.iter()
@@ -2042,7 +2078,8 @@ impl RouterTrait for VllmPDRouter {
             };
 
             // Process vLLM two-stage request with service discovery
-            self.process_vllm_request(request_json, "/v1/completions", headers)
+            let request_text = self.routing_text_for(body);
+            self.process_vllm_request(request_json, request_text, "/v1/completions", headers)
                 .await
         } else {
             // Direct URL mode - implement routing logic here (not delegating to PdRouterBase)
@@ -2090,7 +2127,7 @@ impl RouterTrait for VllmPDRouter {
             }
 
             // Select workers using policy with headers for consistent hash
-            let request_text = serde_json::to_string(&request_json).ok();
+            let request_text = self.routing_text_for(body);
             let request_str = request_text.as_deref();
             let request_headers: Option<HashMap<String, String>> = headers.map(|h| {
                 h.iter()
@@ -2195,8 +2232,15 @@ impl RouterTrait for VllmPDRouter {
                     .into_response()
             }
         };
-        self.route_transparent(headers, "/v1/responses", &Method::POST, request_json)
-            .await
+        let request_text = self.routing_text_for(body);
+        self.process_transparent(
+            headers,
+            "/v1/responses",
+            &Method::POST,
+            request_json,
+            request_text,
+        )
+        .await
     }
 
     async fn get_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
@@ -2234,8 +2278,15 @@ impl RouterTrait for VllmPDRouter {
                     .into_response()
             }
         };
-        self.route_transparent(headers, "/v1/rerank", &Method::POST, request_json)
-            .await
+        let request_text = self.routing_text_for(body);
+        self.process_transparent(
+            headers,
+            "/v1/rerank",
+            &Method::POST,
+            request_json,
+            request_text,
+        )
+        .await
     }
 
     async fn flush_cache(&self) -> Response {
@@ -2263,6 +2314,23 @@ impl RouterTrait for VllmPDRouter {
         method: &Method,
         body: serde_json::Value,
     ) -> Response {
+        // Untyped passthrough: no typed request is available to key routing on.
+        self.process_transparent(headers, path, method, body, None)
+            .await
+    }
+}
+
+impl VllmPDRouter {
+    /// Transparent P/D proxy with a precomputed routing text. Typed callers pass the
+    /// request's extract_text_for_routing; untyped passthrough callers pass None.
+    async fn process_transparent(
+        &self,
+        headers: Option<&HeaderMap>,
+        path: &str,
+        method: &Method,
+        body: serde_json::Value,
+        request_text: Option<String>,
+    ) -> Response {
         // Only handle POST requests for inference
         if *method != Method::POST {
             return (
@@ -2282,7 +2350,8 @@ impl RouterTrait for VllmPDRouter {
 
         if self.use_discovery {
             // Discovery mode - use vLLM-specific two-stage processing
-            self.process_vllm_request(request_json, path, headers).await
+            self.process_vllm_request(request_json, request_text, path, headers)
+                .await
         } else {
             // Direct URL mode - use worker registry, filtered by availability
             let all_prefill = self.pd_router.worker_registry.get_prefill_workers();
@@ -2312,7 +2381,6 @@ impl RouterTrait for VllmPDRouter {
             }
 
             // Select workers using policy with headers for consistent hash
-            let request_text = serde_json::to_string(&request_json).ok();
             let request_str = request_text.as_deref();
             let request_headers: Option<HashMap<String, String>> = headers.map(|h| {
                 h.iter()
@@ -2427,6 +2495,37 @@ mod tests {
         assert!(!discovery_is_ready(0, 1));
         assert!(discovery_is_ready(1, 1));
         assert!(discovery_is_ready(2, 3));
+    }
+
+    // PD routing must key on the request's actual text (prompt/messages), the same
+    // source the regular router uses, not the whole serialized request body.
+    #[test]
+    fn test_pd_routing_text_uses_prompt_not_whole_body() {
+        use crate::protocols::spec::{ChatCompletionRequest, CompletionRequest};
+
+        let completion: CompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "hello world",
+            "max_tokens": 123
+        }))
+        .unwrap();
+        let text = completion.extract_text_for_routing();
+        assert_eq!(text, "hello world");
+        assert_ne!(text, serde_json::to_string(&completion).unwrap());
+        assert!(!text.contains("max_tokens"));
+        assert!(!text.contains("test-model"));
+
+        // Chat routing text is session-id based (same as the regular router), not the body.
+        let chat: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "route me"}],
+            "max_tokens": 7,
+            "session_params": {"session_id": "sess-abc"}
+        }))
+        .unwrap();
+        let chat_text = chat.extract_text_for_routing();
+        assert_eq!(chat_text, "sess-abc");
+        assert!(!chat_text.contains("max_tokens"));
     }
 
     // --- OpenAI-style endpoint tests (chat/completions, completions) ---
