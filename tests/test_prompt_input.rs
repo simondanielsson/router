@@ -67,7 +67,10 @@ fn test_prompt_input_single_int_array() {
     assert_eq!(req.prompt.len(), 1);
     assert!(!req.prompt.is_empty());
     assert!(req.prompt.is_token_based());
-    assert_eq!(req.prompt.extract_text_for_routing(), "token_ids:5");
+    assert_eq!(
+        req.prompt.extract_text_for_routing(),
+        "128000 9906 11 1917 0"
+    );
     assert_eq!(req.prompt.estimated_token_count(), 5);
 }
 
@@ -98,7 +101,7 @@ fn test_prompt_input_int_batch() {
     assert!(req.prompt.is_token_based());
     assert_eq!(
         req.prompt.extract_text_for_routing(),
-        "token_ids_batch:2:10"
+        "128000 9906 11 1917 0;128001 9906 11 1917 1"
     );
     assert_eq!(req.prompt.estimated_token_count(), 10);
 }
