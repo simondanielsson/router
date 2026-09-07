@@ -528,7 +528,7 @@ impl VllmPDRouter {
             .collect()
     }
 
-    /// Whether the prefill or decode policy needs the request text (cache_aware, consistent_hash)
+    /// Whether the prefill or decode policy needs the request text (e.g. cache_aware, consistent_hash)
     fn policies_need_request_text(&self) -> bool {
         self.policy_registry
             .get_prefill_policy()
@@ -540,7 +540,7 @@ impl VllmPDRouter {
     }
 
     /// Routing text for cache-aware / consistent-hash policies, derived from the typed
-    /// request the same way the regular router does, and only when a policy needs it.
+    /// request (when a policy needs it).
     fn routing_text_for<T: GenerationRequest>(&self, body: &T) -> Option<String> {
         if !self.policies_need_request_text() {
             return None;
@@ -2314,7 +2314,6 @@ impl RouterTrait for VllmPDRouter {
         method: &Method,
         body: serde_json::Value,
     ) -> Response {
-        // Untyped passthrough: no typed request is available to key routing on.
         self.process_transparent(headers, path, method, body, None)
             .await
     }
@@ -2322,7 +2321,7 @@ impl RouterTrait for VllmPDRouter {
 
 impl VllmPDRouter {
     /// Transparent P/D proxy with a precomputed routing text. Typed callers pass the
-    /// request's extract_text_for_routing; untyped passthrough callers pass None.
+    /// request's extract_text_for_routing. Untyped passthrough callers pass None.
     async fn process_transparent(
         &self,
         headers: Option<&HeaderMap>,
