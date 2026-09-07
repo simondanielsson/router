@@ -75,6 +75,12 @@ fn discovery_is_ready(prefill_count: usize, decode_count: usize) -> bool {
     prefill_count > 0 && decode_count > 0
 }
 
+fn transparent_routing_text(body: &Value, policy_needs_request_text: bool) -> Option<String> {
+    policy_needs_request_text
+        .then(|| serde_json::to_string(body).ok())
+        .flatten()
+}
+
 /// Strip the DP-rank suffix from a worker's HTTP address and return the base address
 /// plus the parsed rank. Returns `(original, None)` when DP is disabled.
 fn extract_base_http_and_dp_rank(
@@ -2314,10 +2320,7 @@ impl RouterTrait for VllmPDRouter {
         method: &Method,
         body: serde_json::Value,
     ) -> Response {
-        let request_text = self
-            .policies_need_request_text()
-            .then(|| serde_json::to_string(&body).ok())
-            .flatten();
+        let request_text = transparent_routing_text(&body, self.policies_need_request_text());
         self.process_transparent(headers, path, method, body, request_text)
             .await
     }
@@ -2498,6 +2501,21 @@ mod tests {
         assert!(!discovery_is_ready(0, 1));
         assert!(discovery_is_ready(1, 1));
         assert!(discovery_is_ready(2, 3));
+    }
+
+    #[test]
+    fn test_transparent_routing_text_preserves_serialized_body() {
+        let body = json!({
+            "model": "test-model",
+            "input": "hello world",
+            "max_output_tokens": 123
+        });
+
+        assert_eq!(
+            transparent_routing_text(&body, true),
+            serde_json::to_string(&body).ok()
+        );
+        assert_eq!(transparent_routing_text(&body, false), None);
     }
 
     // PD routing must key on the request's actual text (prompt/messages), the same
