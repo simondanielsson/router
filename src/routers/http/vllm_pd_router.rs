@@ -2314,7 +2314,11 @@ impl RouterTrait for VllmPDRouter {
         method: &Method,
         body: serde_json::Value,
     ) -> Response {
-        self.process_transparent(headers, path, method, body, None)
+        let request_text = self
+            .policies_need_request_text()
+            .then(|| serde_json::to_string(&body).ok())
+            .flatten();
+        self.process_transparent(headers, path, method, body, request_text)
             .await
     }
 }
