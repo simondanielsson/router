@@ -2443,7 +2443,7 @@ impl WorkerManagement for VllmPDRouter {
 mod tests {
     use super::*;
     use crate::config::types::PolicyConfig;
-    use crate::policies::ConsistentHashPolicy;
+    use crate::policies::{CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy};
     use serde_json::json;
 
     fn assert_discovery_selection_uses_session_header(request: Value) {
@@ -2462,55 +2462,51 @@ mod tests {
             ("decode-3:8000".to_string(), "decode-3:5555".to_string()),
         ];
         let request_text = serde_json::to_string(&request).unwrap();
-        let prefill_workers = VllmPDRouter::instances_to_workers(&prefill_instances);
-        let decode_workers = VllmPDRouter::instances_to_workers(&decode_instances);
-        let prefill_policy = registry.get_prefill_policy();
-        let decode_policy = registry.get_decode_policy();
+        let mut other_request = request;
+        other_request["user"] = json!("different request body");
+        let other_request_text = serde_json::to_string(&other_request).unwrap();
 
-        // Pick a session whose expected choice differs from body-only routing for both pools.
-        let headers =
-            (0..10_000)
-                .find_map(|id| {
-                    let headers =
-                        HashMap::from([("x-session-id".to_string(), format!("session-{id}"))]);
-                    let expected_prefill = prefill_policy.select_worker_with_headers(
-                        &prefill_workers,
-                        Some(&request_text),
-                        Some(&headers),
-                    )?;
-                    let expected_decode = decode_policy.select_worker_with_headers(
-                        &decode_workers,
-                        Some(&request_text),
-                        Some(&headers),
-                    )?;
-                    let body_prefill =
-                        prefill_policy.select_worker(&prefill_workers, Some(&request_text))?;
-                    let body_decode =
-                        decode_policy.select_worker(&decode_workers, Some(&request_text))?;
-                    (expected_prefill != body_prefill && expected_decode != body_decode)
-                        .then_some((headers, expected_prefill, expected_decode))
-                })
-                .expect("a session should route differently from the request body");
+        let selection = |text: &str, headers: &HashMap<String, String>| {
+            (
+                VllmPDRouter::select_worker_with_policy(
+                    &registry,
+                    &prefill_instances,
+                    true,
+                    Some(text),
+                    Some(headers),
+                ),
+                VllmPDRouter::select_worker_with_policy(
+                    &registry,
+                    &decode_instances,
+                    false,
+                    Some(text),
+                    Some(headers),
+                ),
+            )
+        };
 
+        let first_headers = HashMap::from([("x-session-id".to_string(), "session-0".to_string())]);
+        let first_selection = selection(&request_text, &first_headers);
         assert_eq!(
-            VllmPDRouter::select_worker_with_policy(
-                &registry,
-                &prefill_instances,
-                true,
-                Some(&request_text),
-                Some(&headers.0),
-            ),
-            Some(headers.1)
+            first_selection,
+            selection(&other_request_text, &first_headers),
+            "the same session must select the same workers despite a different request body"
         );
+
+        let (second_headers, second_selection) = (1..10_000)
+            .find_map(|id| {
+                let headers =
+                    HashMap::from([("x-session-id".to_string(), format!("session-{id}"))]);
+                let selected = selection(&request_text, &headers);
+                (selected.0 != first_selection.0 && selected.1 != first_selection.1)
+                    .then_some((headers, selected))
+            })
+            .expect("another session should select different prefill and decode workers");
+
         assert_eq!(
-            VllmPDRouter::select_worker_with_policy(
-                &registry,
-                &decode_instances,
-                false,
-                Some(&request_text),
-                Some(&headers.0),
-            ),
-            Some(headers.2)
+            second_selection,
+            selection(&other_request_text, &second_headers),
+            "the second session must also be invariant to the request body"
         );
     }
 
@@ -2530,6 +2526,52 @@ mod tests {
             "messages": [{"role": "user", "content": "chat prompt"}],
             "max_tokens": 16
         }));
+    }
+
+    #[test]
+    fn test_discovery_cache_aware_selection_ignores_session_header() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..CacheAwareConfig::default()
+        };
+        let registry = PolicyRegistry::new(PolicyConfig::Random);
+        registry.set_prefill_policy(Arc::new(CacheAwarePolicy::with_config(config.clone())));
+        registry.set_decode_policy(Arc::new(CacheAwarePolicy::with_config(config)));
+        let prefill_instances = vec![
+            ("prefill-1:8000".to_string(), "prefill-1:5555".to_string()),
+            ("prefill-2:8000".to_string(), "prefill-2:5555".to_string()),
+        ];
+        let decode_instances = vec![
+            ("decode-1:8000".to_string(), "decode-1:5555".to_string()),
+            ("decode-2:8000".to_string(), "decode-2:5555".to_string()),
+        ];
+        registry
+            .get_prefill_policy()
+            .init_workers(&VllmPDRouter::instances_to_workers(&prefill_instances));
+        registry
+            .get_decode_policy()
+            .init_workers(&VllmPDRouter::instances_to_workers(&decode_instances));
+
+        let request = r#"{"model":"test","prompt":"stable cache-aware prefix"}"#;
+        let session_headers =
+            HashMap::from([("x-session-id".to_string(), "must-be-ignored".to_string())]);
+        for (instances, is_prefill) in [(&prefill_instances, true), (&decode_instances, false)] {
+            let without_header = VllmPDRouter::select_worker_with_policy(
+                &registry,
+                instances,
+                is_prefill,
+                Some(request),
+                None,
+            );
+            let with_header = VllmPDRouter::select_worker_with_policy(
+                &registry,
+                instances,
+                is_prefill,
+                Some(request),
+                Some(&session_headers),
+            );
+            assert_eq!(with_header, without_header);
+        }
     }
 
     #[test]
