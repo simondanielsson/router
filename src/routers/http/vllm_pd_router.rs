@@ -2555,6 +2555,8 @@ mod tests {
         let request = r#"{"model":"test","prompt":"stable cache-aware prefix"}"#;
         let session_headers =
             HashMap::from([("x-session-id".to_string(), "must-be-ignored".to_string())]);
+        // should map to the same instance since the prompt is identical, even though the 
+        // session header is different 
         for (instances, is_prefill) in [(&prefill_instances, true), (&decode_instances, false)] {
             let without_header = VllmPDRouter::select_worker_with_policy(
                 &registry,
