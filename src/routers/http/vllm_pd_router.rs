@@ -547,12 +547,12 @@ impl VllmPDRouter {
 
     /// Routing text for cache-aware / consistent-hash policies, derived from the typed
     /// request (when a policy needs it).
-fn routing_text_for<T: GenerationRequest>(&self, body: &T) -> Option<String> {
-    if !self.policies_need_request_text() {
-        return None;
+    fn routing_text_for<T: GenerationRequest>(&self, body: &T) -> Option<String> {
+        if !self.policies_need_request_text() {
+            return None;
+        }
+        Some(body.extract_text_for_routing())
     }
-    Some(body.extract_text_for_routing())
-}
 
     /// Select worker using policy-based load balancing
     fn select_worker_with_policy(
@@ -2322,9 +2322,10 @@ impl RouterTrait for VllmPDRouter {
 }
 
 impl VllmPDRouter {
-/// Transparent P/D proxy with a precomputed routing text. Typed callers pass the
-/// request's extract_text_for_routing. Untyped passthrough callers pass a
-/// serialized body when a policy needs request text; otherwise None.
+    /// Transparent P/D proxy with a precomputed routing text. Typed callers pass the
+    /// request's extract_text_for_routing. Untyped passthrough callers pass a
+    /// serialized body when a policy needs request text; otherwise None.
+    async fn process_transparent(
         &self,
         headers: Option<&HeaderMap>,
         path: &str,
