@@ -81,7 +81,7 @@ fn normalize_request_headers(headers: &HeaderMap) -> HashMap<String, String> {
             value
                 .to_str()
                 .ok()
-                .map(|v| (name.as_str().to_lowercase(), v.to_string()))
+                .map(|v| (name.as_str().to_ascii_lowercase(), v.to_string()))
         })
         .collect()
 }
@@ -604,7 +604,11 @@ impl VllmPDRouter {
         // Use policy-based load balancing to select prefill and decode workers
         let request_text = serde_json::to_string(&request_json).ok();
         let request_str = request_text.as_deref();
-        let request_headers = headers.map(normalize_request_headers);
+        let policies_need_headers = self.policy_registry.get_prefill_policy().needs_headers()
+            || self.policy_registry.get_decode_policy().needs_headers();
+        let request_headers = headers
+            .filter(|_| policies_need_headers)
+            .map(normalize_request_headers);
 
         let prefill_idx = match Self::select_worker_with_policy(
             &self.policy_registry,
