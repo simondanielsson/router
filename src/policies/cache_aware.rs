@@ -63,7 +63,7 @@ use super::{get_healthy_worker_indices, CacheAwareConfig, LoadBalancingPolicy, R
 use crate::core::Worker;
 use crate::metrics::RouterMetrics;
 use crate::policies::normalize_model_key;
-use crate::protocols::spec::TOKEN_ID_SEPARATOR;
+use crate::protocols::spec::{is_token_id_key, TOKEN_ID_SEPARATOR};
 use crate::tree::Tree;
 use dashmap::DashMap;
 use rand::Rng;
@@ -78,7 +78,7 @@ fn token_aware_match_rate(text: &str, matched_char_count: usize, input_char_coun
     if input_char_count == 0 {
         return 0.0;
     }
-    if text.contains(TOKEN_ID_SEPARATOR) {
+    if is_token_id_key(text) {
         let total_tokens = text.matches(TOKEN_ID_SEPARATOR).count();
         if total_tokens == 0 {
             return 0.0;
@@ -499,27 +499,38 @@ mod tests {
 
     #[test]
     fn test_token_aware_match_rate_ignores_partial_token_ids() {
-        // "123457\u{1f}8\u{1f}" vs cached "123456\u{1f}7\u{1f}" share 5 chars but
-        // zero complete tokens -> rate 0.
-        let incoming = "123457\u{1f}8\u{1f}";
+        // "\u{1e}123457\u{1f}8\u{1f}" vs cached "\u{1e}123456\u{1f}7\u{1f}" share 6 chars
+        // but zero complete tokens -> rate 0.
+        let incoming = "\u{1e}123457\u{1f}8\u{1f}";
         let input = incoming.chars().count();
-        assert_eq!(token_aware_match_rate(incoming, 5, input), 0.0);
+        assert_eq!(token_aware_match_rate(incoming, 6, input), 0.0);
     }
 
     #[test]
     fn test_token_aware_match_rate_counts_whole_tokens() {
         // Matched through two separators plus a partial third token -> 2 of 3.
-        let incoming = "10\u{1f}20\u{1f}30\u{1f}";
+        let incoming = "\u{1e}10\u{1f}20\u{1f}30\u{1f}";
         let input = incoming.chars().count();
-        assert_eq!(token_aware_match_rate(incoming, 7, input), 2.0 / 3.0);
+        assert_eq!(token_aware_match_rate(incoming, 8, input), 2.0 / 3.0);
         // Full match -> 1.0.
         assert_eq!(token_aware_match_rate(incoming, input, input), 1.0);
     }
 
     #[test]
     fn test_token_aware_match_rate_text_keys_use_chars() {
-        // Plain-text keys have no separator -> character ratio, unchanged.
+        // Plain-text keys are scored by character ratio, unchanged.
         assert_eq!(token_aware_match_rate("hello world", 6, 11), 6.0 / 11.0);
+    }
+
+    #[test]
+    fn test_token_aware_match_rate_untagged_separator_text_uses_chars() {
+        // A prompt containing a raw separator is still text, not a token-id key.
+        let incoming = "hello\u{1f}world";
+        let input = incoming.chars().count();
+        assert_eq!(
+            token_aware_match_rate(incoming, 6, input),
+            6.0 / input as f32
+        );
     }
 
     #[test]
